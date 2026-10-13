@@ -1,0 +1,18 @@
+fastapi>=0.115.0
+uvicorn>=0.30.0
+sqlalchemy>=2.0.35
+pydantic>=2.7.4
+pydantic-settings>=2.3.4
+python-dotenv>=1.0.1
+PyMuPDF>=1.18.0
+python-pptx>=1.0.0
+openai>=1.51.2
+python-multipart>=0.0.9
+numpy>=1.26.0
+
+# Optional dependencies
+# Persistent semantic vector search: pip install "chromadb>=1.5.9"
+# Optional custom embedding override; may install heavyweight Torch dependencies:
+# pip install "sentence-transformers>=3.2.1"
+# MP4 transcription is optional and may require heavyweight Torch and ffmpeg installs.
+# If installed, the Whisper import package is provided by openai-whisper.
