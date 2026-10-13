@@ -81,7 +81,7 @@ novamind/
 From PowerShell:
 
 ```powershell
-cd "c:\Users\NETHRA BHOOVARAGAVAN\Documents\NovaMind"
+cd NovaMind
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
