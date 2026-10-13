@@ -18,6 +18,26 @@ def retrieve_context(question: str, material_id: Optional[int] = None, topic: Op
     if not chunks:
         return []
 
+    # Keep the top-ranked source document as the grounding scope. This prevents
+    # semantically adjacent passages from unrelated uploaded courses from
+    # diluting the answer context or its citation checks.
+    primary_material_id = chunks[0].get("material_id")
+    if primary_material_id is not None:
+        focused_chunks = [
+            chunk
+            for chunk in chunks
+            if str(chunk.get("material_id")) == str(primary_material_id)
+        ]
+        if focused_chunks:
+            chunks = focused_chunks
+    else:
+        primary_source = chunks[0].get("source_name")
+        focused_chunks = [
+            chunk for chunk in chunks if chunk.get("source_name") == primary_source
+        ]
+        if focused_chunks:
+            chunks = focused_chunks
+
     normalized: List[Dict[str, Any]] = []
     for chunk in chunks:
         normalized.append(

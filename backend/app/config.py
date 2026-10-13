@@ -20,6 +20,14 @@ LLM_PROVIDER = _get_env("LLM_PROVIDER", "openai_compatible")
 LLM_API_KEY = _get_env("LLM_API_KEY", "")
 LLM_BASE_URL = _get_env("LLM_BASE_URL", "")
 LLM_MODEL_NAME = _get_env("LLM_MODEL_NAME", "")
+CORS_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in _get_env(
+        "CORS_ORIGINS",
+        "http://127.0.0.1:5173,http://localhost:5173",
+    ).split(",")
+    if origin.strip()
+]
 
 
 def ensure_directories() -> None:

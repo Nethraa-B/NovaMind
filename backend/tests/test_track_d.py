@@ -1,20 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pptx import Presentation
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.evaluation.evaluator import reference_token_f1, run_model_evaluation
+from app.assessment.generator import generate_assessment_questions
 from app.ingestion.ppt_processor import extract_ppt_chunks
 from app.ingestion.processor import (
     assign_explicit_prerequisites,
@@ -27,7 +31,11 @@ from app.learner.misconceptions import detect_misconception
 from app.learner.recommendations import generate_recommendations
 from app import main
 from app.llm import LLMError
-from app.main import _citations_match_retrieved_chunks, submit_assessment
+from app.main import (
+    _citations_match_retrieved_chunks,
+    _citations_used_in_answer,
+    submit_assessment,
+)
 from app.models import (
     AssessmentLog,
     AssessmentQuestion,
@@ -37,7 +45,8 @@ from app.models import (
     Topic,
 )
 from app.rag.vector_store import _simple_embedding
-from app.schemas import AskResponse, AssessmentSubmission, Citation
+from app.rag.retriever import retrieve_context
+from app.schemas import AskRequest, AskResponse, AssessmentSubmission, Citation
 
 
 class TrackDTests(unittest.TestCase):
@@ -63,6 +72,259 @@ class TrackDTests(unittest.TestCase):
             )
         )
         self.assertFalse(_citations_match_retrieved_chunks("No citation included.", chunks))
+        self.assertFalse(
+            _citations_match_retrieved_chunks(
+                "[DBMS course.pdf | Page 4] [OtherBook.pdf | Page 99]", chunks
+            )
+        )
+        self.assertTrue(
+            _citations_match_retrieved_chunks(
+                "[source: DBMS course.pdf | Page 4]", chunks
+            )
+        )
+        multiple_pages = [
+            {"source_name": "DBMS course.pdf", "location_ref": "Page 1"},
+            {"source_name": "DBMS course.pdf", "location_ref": "Page 2"},
+        ]
+        self.assertEqual(
+            [citation.location for citation in _citations_used_in_answer(
+                "Fact [DBMS course.pdf | Page 2]", multiple_pages
+            )],
+            ["Page 2"],
+        )
+
+    def test_acid_queries_keep_only_top_ranked_source_material(self) -> None:
+        candidates = [
+            {"content": "ACID definitions and bank transfer.", "material_id": "1", "source_name": "DBMS.pdf", "location_ref": "Page 2"},
+            {"content": "Normalization overview.", "material_id": "1", "source_name": "DBMS.pdf", "location_ref": "Page 1"},
+            {"content": "Encapsulation and abstraction.", "material_id": "2", "source_name": "OOP.pdf", "location_ref": "Page 2"},
+            {"content": "Social Science agriculture.", "material_id": "3", "source_name": "Social Science.pdf", "location_ref": "Page 162"},
+        ]
+        with patch("app.rag.retriever.search_chunks", return_value=candidates):
+            chunks = retrieve_context("Explain ACID properties using a bank transfer example.")
+
+        self.assertEqual(
+            [(chunk["material_id"], chunk["location_ref"]) for chunk in chunks],
+            [("1", "Page 2"), ("1", "Page 1")],
+        )
+
+    def test_bank_transfer_answer_is_grounded_and_rejects_extra_mechanisms(self) -> None:
+        chunks = [
+            {
+                "content": (
+                    "Atomicity ensures all transaction operations complete or "
+                    "are rolled back. The bank transfer either has both "
+                    "steps succeed or neither happens. Consistency ensures total funds remain "
+                    "constant. Isolation prevents a concurrent balance check "
+                    "from seeing Account A debited before Account B is credited. "
+                    "Durability ensures new balances persist after a server "
+                    "loses power."
+                ),
+                "source_name": "DBMS Fundamentals_ Normalization and ACID Properties.pdf",
+                "location_ref": "Page 2",
+            }
+        ]
+        answer = (
+            "Atomicity ensures both transfer steps succeed or neither does. "
+            "Consistency keeps total funds constant. Isolation prevents a "
+            "balance check from seeing A debited before B is credited. "
+            "Durability preserves the new balances after power loss. "
+            "[DBMS Fundamentals_ Normalization and ACID Properties.pdf | Page 2]"
+        )
+        with patch.object(main, "generate_text", return_value=answer):
+            result = main._answer_from_context(
+                "Explain ACID properties using a bank transfer example.", chunks
+            )
+        self.assertTrue(result.supported)
+
+        unsupported_extension = answer.replace(
+            "Durability preserves the new balances after power loss.",
+            "Durability preserves the new balances using quantum magnetic storage after power loss.",
+        )
+        with patch.object(main, "generate_text", return_value=unsupported_extension):
+            result = main._answer_from_context(
+                "Explain ACID properties using a bank transfer example.", chunks
+            )
+        self.assertFalse(result.supported)
+
+    def test_explicit_source_name_resolves_material_id(self) -> None:
+        dbms = Material(
+            filename="DBMS Fundamentals_ Normalization and ACID Properties.pdf",
+            file_type="pdf",
+        )
+        social = Material(
+            filename="Class_10_Social_Science_English_2025_Edition.pdf",
+            file_type="pdf",
+        )
+        self.session.add_all([dbms, social])
+        self.session.flush()
+
+        self.assertEqual(
+            main._material_id_from_question(
+                "What are the ACID properties mentioned in the uploaded DBMS PDF?",
+                self.session,
+            ),
+            dbms.id,
+        )
+        self.assertEqual(
+            main._material_id_from_question(
+                "Explain ACID properties using a bank transfer example.",
+                self.session,
+            ),
+            dbms.id,
+        )
+        self.assertIsNone(
+            main._material_id_from_question("Explain a bank transfer", self.session)
+        )
+
+    def test_answer_requires_supported_claims_and_an_existing_citation(self) -> None:
+        chunks = [
+            {
+                "content": "Durability ensures committed database changes survive system failures.",
+                "source_name": "dbms.pdf",
+                "location_ref": "Page 4",
+            }
+        ]
+        fullwidth_citation = chr(0x3010) + "dbms.pdf | Page 4" + chr(0x3011)
+        supported_answers = [
+            "Durability ensures committed database changes survive system failures. [dbms.pdf | Page 4]",
+            "Durability ensures committed database changes survive system failures. "
+            + fullwidth_citation,
+        ]
+
+        for answer in supported_answers:
+            with self.subTest(answer=answer), patch.object(
+                main, "generate_text", return_value=answer
+            ):
+                result = main._answer_from_context("What does durability guarantee?", chunks)
+                self.assertTrue(result.supported)
+
+        unsupported_answers = [
+            "B-tree indexes in quantum devices encrypt every record. [dbms.pdf | Page 4]",
+            "Durability ensures committed database changes survive system failures.",
+            "Durability ensures committed database changes survive system failures. "
+            "B-tree indexes encrypt every record. [dbms.pdf | Page 4]",
+            "Durability ensures committed database changes survive system failures, "
+            "and B-tree indexes encrypt every record. [dbms.pdf | Page 4]",
+        ]
+
+        for answer in unsupported_answers:
+            with self.subTest(answer=answer), patch.object(
+                main, "generate_text", return_value=answer
+            ):
+                result = main._answer_from_context("What does durability guarantee?", chunks)
+                self.assertFalse(result.supported)
+                self.assertNotIn("[dbms.pdf | Page 4]", result.answer)
+
+        concise_properties = (
+            "The PDF lists the four ACID properties of a database transaction: "
+            "Atomicity - all operations in the transaction succeed or the whole "
+            "transaction is rolled back. Consistency - the transaction moves "
+            "the database from one valid state to another, preserving all "
+            "integrity rules. Isolation - concurrent transactions run "
+            "independently without seeing each other's intermediate results. "
+            "Durability - once a transaction commits, its changes are permanently "
+            "stored and survive system failures. These are taken directly from "
+            "the course material [dbms.pdf | Page 2]."
+        )
+        acid_chunks = [
+            {
+                "content": (
+                    "Atomicity ensures all transaction operations complete or "
+                    "are rolled back. Consistency moves the database from one "
+                    "valid state to another and obeys schema constraints. "
+                    "Isolation ensures concurrent transactions execute "
+                    "independently without interfering with intermediate states. "
+                    "Durability ensures committed modifications are permanently "
+                    "saved and survive system failures."
+                ),
+                "source_name": "dbms.pdf",
+                "location_ref": "Page 2",
+            }
+        ]
+        with patch.object(main, "generate_text", return_value=concise_properties):
+            result = main._answer_from_context(
+                "What are the ACID properties mentioned in the uploaded DBMS PDF?",
+                acid_chunks,
+            )
+        self.assertTrue(result.supported)
+
+    def test_failed_claim_check_gets_one_strict_retry(self) -> None:
+        chunks = [
+            {
+                "content": "Durability preserves committed changes after a system failure.",
+                "source_name": "dbms.pdf",
+                "location_ref": "Page 2",
+            }
+        ]
+        invalid = "B-tree indexes encrypt every record. [dbms.pdf | Page 2]"
+        valid = "Durability preserves committed changes after a system failure. [dbms.pdf | Page 2]"
+        with patch.object(main, "generate_text", side_effect=[invalid, valid]) as generate:
+            result = main._answer_from_context("What does durability guarantee?", chunks)
+        self.assertTrue(result.supported)
+        self.assertEqual(generate.call_count, 2)
+        self.assertIn("failed source verification", generate.call_args_list[1].args[0])
+
+    def test_retry_does_not_force_unsupported_answer_to_supported(self) -> None:
+        chunks = [
+            {
+                "content": "Durability preserves committed changes after a system failure.",
+                "source_name": "dbms.pdf",
+                "location_ref": "Page 2",
+            }
+        ]
+        invalid = "B-tree indexes encrypt every record. [dbms.pdf | Page 2]"
+        with patch.object(main, "generate_text", return_value=invalid) as generate:
+            result = main._answer_from_context("What does durability guarantee?", chunks)
+        self.assertFalse(result.supported)
+        self.assertEqual(generate.call_count, 2)
+
+    def test_explicitly_unsupported_model_answer_stays_unsupported(self) -> None:
+        chunks = [
+            {
+                "content": "Durability ensures committed database changes survive system failures.",
+                "source_name": "dbms.pdf",
+                "location_ref": "Page 4",
+            }
+        ]
+        answer = "The provided material does not specify the recovery interval."
+        with patch.object(main, "generate_text", return_value=answer):
+            result = main._answer_from_context("What is the recovery interval?", chunks)
+        self.assertFalse(result.supported)
+        self.assertEqual(result.answer, answer)
+
+    def test_failed_pre_persistence_upload_removes_only_its_temp_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            upload_path = Path(directory) / "parse-failure.pdf"
+            upload = UploadFile(filename=upload_path.name, file=BytesIO(b"invalid pdf"))
+            with patch.object(main, "UPLOAD_DIR", Path(directory)), patch.object(
+                main, "process_upload", side_effect=ValueError("No usable content")
+            ):
+                with self.assertRaises(HTTPException) as raised:
+                    asyncio.run(main.upload_material(upload, db=None))
+
+            self.assertEqual(raised.exception.status_code, 400)
+            self.assertFalse(upload_path.exists())
+
+    def test_retrieval_failure_returns_service_unavailable(self) -> None:
+        with patch.object(main, "_material_id_from_question", return_value=None), patch.object(
+            main, "retrieve_context", side_effect=RuntimeError("index offline")
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                main.ask_question(AskRequest(question="What is durability?"), db=None)
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(raised.exception.detail, "Course retrieval is temporarily unavailable.")
+
+    def test_cors_uses_explicit_local_origins_without_credentials(self) -> None:
+        cors = next(
+            middleware
+            for middleware in main.app.user_middleware
+            if middleware.cls is CORSMiddleware
+        )
+        self.assertNotIn("*", cors.kwargs["allow_origins"])
+        self.assertIn("http://127.0.0.1:5173", cors.kwargs["allow_origins"])
+        self.assertFalse(cors.kwargs["allow_credentials"])
 
     def test_fallback_embedding_is_stable_across_processes(self) -> None:
         backend_dir = Path(__file__).resolve().parents[1]
@@ -97,6 +359,45 @@ class TrackDTests(unittest.TestCase):
         self.assertEqual(detect_file_type("course.pptx"), ".pptx")
         with self.assertRaises(ValueError):
             detect_file_type("legacy.ppt")
+
+    def test_assessment_questions_require_definition_evidence(self) -> None:
+        topic = Topic(name="Transactions and Concurrency")
+        self.session.add(topic)
+        self.session.flush()
+        chunk = ContentChunk(
+            material_id=1,
+            content="Lecture outline lists ACID terms: atomicity, durability, consistency, isolation.",
+            source_name="outline.pdf",
+            source_type="pdf",
+            location_ref="Page 1",
+            topic_id=topic.id,
+            chunk_hash="assessment-terms-only",
+        )
+        self.session.add(chunk)
+        self.session.commit()
+
+        self.assertEqual(
+            generate_assessment_questions(self.session, topic=topic.name, limit=5),
+            [],
+        )
+
+        chunk.content = (
+            "Atomicity makes a transaction all-or-nothing. Durability ensures "
+            "committed changes survive system failures. Consistency enforces "
+            "valid database constraints. Isolation lets concurrent transactions "
+            "execute independently without interference."
+        )
+        self.session.commit()
+        questions = generate_assessment_questions(
+            self.session, topic=topic.name, limit=5
+        )
+        self.assertEqual(
+            {question.correct_answer for question in questions},
+            {"Atomicity", "Durability", "Consistency", "Isolation"},
+        )
+        self.assertTrue(
+            all(question.source_reference == "outline.pdf | Page 1" for question in questions)
+        )
 
     def test_prerequisite_requires_explicit_course_statement(self) -> None:
         material = Material(filename="prerequisite-source.pdf", file_type="pdf")

@@ -26,6 +26,8 @@ Rules:
 4. If the evidence is insufficient, explicitly say so.
 5. Do not present outside knowledge as course-grounded knowledge.
 6. If you intentionally provide outside knowledge, label it clearly as outside-course context.
+7. Do not add constraints, examples, mechanisms, or technical details that are not stated in the retrieved text.
+8. Keep explanations concise and cite each factual sentence that summarizes the source.
 
 Question:
 {question}

@@ -121,7 +121,7 @@ LLM_BASE_URL=https://your-openai-compatible-endpoint
 LLM_MODEL_NAME=your-model-name
 ```
 
-The configuration file is `backend/.env`. If you do not configure a live LLM endpoint, the API still runs, but grounded answers return `supported: false`; live evaluation returns a provider-unavailable error rather than fabricated results.
+The configuration file is `backend/.env`. Set `CORS_ORIGINS` to the comma-separated frontend origins allowed to call the API. The example allows both local Vite hostnames. If you do not configure a live LLM endpoint, the API still runs, but grounded answers return `supported: false`; live evaluation returns a provider-unavailable error rather than fabricated results.
 
 ## Start the FastAPI server
 

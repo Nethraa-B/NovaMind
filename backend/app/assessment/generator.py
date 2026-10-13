@@ -15,6 +15,7 @@ def _build_mcqs(
     lower = text.lower()
     source = f"{chunk.source_name} | {chunk.location_ref}"
     questions: List[Dict[str, Any]] = []
+    contains_any = lambda *phrases: any(phrase in lower for phrase in phrases)
 
     # Transaction questions: use only chunks containing actual ACID details.
     is_transaction_topic = (
@@ -23,7 +24,29 @@ def _build_mcqs(
     )
 
     if is_transaction_topic:
-        if "atomicity:" in lower or "atomicity" in lower:
+        atomicity_evidence = "atomicity" in lower and (
+            contains_any("all-or-nothing", "all or nothing")
+            or (
+                contains_any("complete", "entire")
+                and contains_any("rollback", "roll back", "abort", "none")
+            )
+        )
+        durability_evidence = "durability" in lower and contains_any(
+            "committed", "commit"
+        ) and contains_any("persist", "survive", "failure", "crash", "saved")
+        consistency_evidence = "consistency" in lower and (
+            contains_any("constraint", "constraints", "rules")
+            or ("valid" in lower and "database" in lower)
+        )
+        isolation_evidence = "isolation" in lower and (
+            (
+                "concurrent" in lower
+                and contains_any("interfer", "independent", "separate")
+            )
+            or contains_any("as if serial", "serializable", "serial schedule")
+        )
+
+        if atomicity_evidence:
             questions.append({
                 "topic": topic,
                 "concept": concept,
@@ -41,7 +64,7 @@ def _build_mcqs(
                 "source_reference": source,
             })
 
-        if "durability:" in lower or "durability" in lower:
+        if durability_evidence:
             questions.append({
                 "topic": topic,
                 "concept": concept,
@@ -58,7 +81,7 @@ def _build_mcqs(
                 "source_reference": source,
             })
 
-        if "consistency:" in lower or "consistency" in lower:
+        if consistency_evidence:
             questions.append({
                 "topic": topic,
                 "concept": concept,
@@ -75,7 +98,7 @@ def _build_mcqs(
                 "source_reference": source,
             })
 
-        if "isolation:" in lower or "isolation" in lower:
+        if isolation_evidence:
             questions.append({
                 "topic": topic,
                 "concept": concept,
@@ -92,7 +115,7 @@ def _build_mcqs(
                 "source_reference": source,
             })
 
-        if "rollback" in lower or "bank-transfer" in lower or "bank transfer" in lower:
+        if atomicity_evidence and contains_any("rollback", "roll back"):
             questions.append({
                 "topic": topic,
                 "concept": concept,
@@ -115,7 +138,10 @@ def _build_mcqs(
         return questions
 
     # Normalization questions for non-transaction topics.
-    if "1nf" in lower or "first normal form" in lower:
+    if (
+        contains_any("1nf", "first normal form")
+        and contains_any("atomic value", "atomic values", "single value")
+    ):
         questions.append({
             "topic": topic,
             "concept": concept,
@@ -130,7 +156,11 @@ def _build_mcqs(
             "source_reference": source,
         })
 
-    if "2nf" in lower or "partial functional dependencies" in lower:
+    if (
+        contains_any("2nf", "second normal form")
+        and "partial" in lower
+        and contains_any("functional dependency", "functional dependencies")
+    ):
         questions.append({
             "topic": topic,
             "concept": concept,
@@ -144,7 +174,10 @@ def _build_mcqs(
             "source_reference": source,
         })
 
-    if "3nf" in lower or "transitive dependencies" in lower:
+    if (
+        contains_any("3nf", "third normal form")
+        and contains_any("transitive dependenc", "transitive dependency")
+    ):
         questions.append({
             "topic": topic,
             "concept": concept,
@@ -158,7 +191,11 @@ def _build_mcqs(
             "source_reference": source,
         })
 
-    if "primary key" in lower:
+    if (
+        "primary key" in lower
+        and contains_any("unique", "uniquely")
+        and contains_any("row", "record", "tuple")
+    ):
         questions.append({
             "topic": topic,
             "concept": concept,
