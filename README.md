@@ -246,6 +246,6 @@ python -m unittest discover -s tests -v
 - If LLM calls fail, confirm `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL_NAME` are set correctly.
 - If ChromaDB fails, check the `CHROMA_PERSIST_DIR` and that the database directory is writable.
 
-## AI-assisted development disclosure
+### AI-Assisted Development Disclosure
 
-This project was developed with AI-assisted tooling and iterative code generation. The implementation is intentionally lightweight, explainable, and grounded in uploaded course material rather than relying on fabricated outputs.
+This project was developed with assistance from the **VS Code Agent and ChatGPT**. These tools supported code generation, debugging, implementation, and documentation. AI-generated suggestions were reviewed, tested, and adapted during development. The project was built iteratively, with manual review and testing of the resulting implementation.
